@@ -1,115 +1,166 @@
 import { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 import Navbar from "../components/Navbar";
 import AuctionItem from "../auction/AuctionItem";
 import BidPanel from "../auction/BidPanel";
 import Leaderboard from "../auction/LeaderBoard";
 import WinnerModal from "../auction/WinnerModal";
 import AuthModal from "../components/AuthModal";
-import { useLocation } from "react-router-dom";
+import { useAuction } from "../context/AuctionContext";
 
 export default function Auction() {
-  const location = useLocation();
-  // Get initial state from URL query if exists (e.g. ?state=LOBBY)
-  const queryParams = new URLSearchParams(location.search);
-  const initialState = queryParams.get("state") || "LIVE"; // defaulting to LIVE if normal load
+  const { auction, socket } = useAuction();
+  const navigate = useNavigate();
 
-  const [status, setStatus] = useState(initialState); // 'LOBBY' | 'LIVE' | 'ENDED' | 'CANCELLED'
+  const [status, setStatus] = useState("LIVE"); // 'LIVE' | 'ENDED'
   const [showAuth, setShowAuth] = useState(false);
   
-  // Lobby State
-  const [lobbyCountdown, setLobbyCountdown] = useState(15);
-  const [participants, setParticipants] = useState(1);
-  const minParticipants = 2; // Simulated from mock backend
-
-  // Winner State
+  // Real-time backend states
+  const [timeLeft, setTimeLeft] = useState(15);
+  const [currentBid, setCurrentBid] = useState(48400000); 
+  const [leadingBidder, setLeadingBidder] = useState("Awaiting Bids...");
+  const [bidHistory, setBidHistory] = useState([]); // Will now be driven by ZSET leaderboard!
   const [winnerData, setWinnerData] = useState(null);
 
-  // Lobby Timer Effect
   useEffect(() => {
-    if (status !== "LOBBY") return;
-    
-    // Simulate someone joining at 8 seconds left
-    const joinTimer = setTimeout(() => {
-      setParticipants(p => p + 1);
-    }, 7000);
+    if (auction.status !== "live" && auction.status !== "ended") {
+       navigate("/lobby");
+    }
+  }, [auction.status, navigate]);
+  
+  // 1. Initial State Sync
+  useEffect(() => {
+    if (auction.item) {
+       const initialPrice = auction.item.suggestedBasePrice 
+          ? auction.item.suggestedBasePrice.amount 
+          : parseFloat(auction.item.marketValue) || 48400000;
+       setCurrentBid((prev) => prev === 48400000 ? initialPrice : prev);
+    }
+  }, [auction.item]);
 
-    const timer = setInterval(() => {
-      setLobbyCountdown((prev) => {
-        if (prev <= 1) {
-          clearInterval(timer);
-          // Transition logic when countdown hits 0
-          if (participants >= minParticipants || true) { // Forced true for smooth hackathon demo
-             setStatus("LIVE");
-          } else {
-             setStatus("CANCELLED");
-          }
-          return 0;
-        }
-        return prev - 1;
+  // 2. WebSocket Engine (SSOT)
+  useEffect(() => {
+    if (status !== "LIVE" || !socket) return;
+    
+    socket.emit('join_auction_room', { auctionId: 'demo_1', userId: 'You' });
+
+    const handleStateUpdate = (state) => {
+      setCurrentBid(state.highestBid);
+      setLeadingBidder(state.leader);
+
+      // Reformat the ZSET leaderboard array into the UI format
+      if (state.leaderboard) {
+        const historyFormat = state.leaderboard.map(leader => ({
+          id: leader.bidder, // uuid or name
+          bidder: leader.bidder,
+          initial: leader.bidder.substring(0, 2).toUpperCase(),
+          time: new Date().toLocaleTimeString('en-US'),
+          amount: leader.amount,
+          leading: leader.rank === 1
+        }));
+        setBidHistory(historyFormat);
+      }
+    };
+
+    const handleHammerDrop = (payload) => {
+      console.log("💥 HAMMER DROP EVENT RECEIVED FROM NODE ENGINE!", payload);
+      setWinnerData({
+        name: payload.winnerId || "No Bids",
+        amount: new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(payload.finalAmount || 0),
       });
-    }, 1000);
+      setStatus("ENDED");
+    };
+
+    const handleAuctionStarted = (payload) => {
+      console.log("⏱️ SERVER TIMER STARTED:", payload.durationMs);
+      setTimeLeft(payload.durationMs / 1000);
+    };
+
+    socket.on('auction_state_update', handleStateUpdate);
+    socket.on('hammer_drop', handleHammerDrop);
+    socket.on('auction_started', handleAuctionStarted);
 
     return () => {
-      clearInterval(timer);
-      clearTimeout(joinTimer);
-    };
-  }, [status, participants]);
+      socket.off('auction_state_update', handleStateUpdate);
+      socket.off('hammer_drop', handleHammerDrop);
+      socket.off('auction_started', handleAuctionStarted);
+    }
+  }, [status, socket]);
 
-  const handleAuctionEnd = (finalWinnerData) => {
-    setWinnerData(finalWinnerData || {
-      name: "Anonymous Bidder #A9",
-      amount: "₹48,405,000",
+
+  // 3. Local UI Timer (Since the server only dictates the hammer drop)
+  useEffect(() => {
+    if (status !== "LIVE" || timeLeft <= 0) return;
+    const timer = setInterval(() => {
+      setTimeLeft((prev) => prev - 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [status, timeLeft]);
+
+
+  // 4. WebSocket Load-Testing Bot Simulator (REMOVED based on User Feedback!)
+  /*
+  useEffect(() => {
+    if (status !== "LIVE" || timeLeft <= 0 || !socket) return;
+    
+    let active = true;
+    const fireRandomBid = () => {
+      // Dummy bot script purged! Room is authentically clean.
+    };
+    return () => { active = false; };
+  }, [status, timeLeft, currentBid, socket]);
+  */
+
+  const handlePlaceBid = (amountToAdd) => {
+    let user = { name: "Guest" };
+    try {
+       const parsed = JSON.parse(localStorage.getItem('auctra_user'));
+       if (parsed) user = parsed;
+    } catch(e) {}
+    
+    // We already passed the exact integer from BidPanel (which calculated 10%, 20% etc)!
+    const newBid = amountToAdd === "DOUBLE" ? currentBid * 2 : currentBid + amountToAdd;
+    
+    // Convert to a raw network emit. NO UI override! UI will update if Node accepts it securely.
+    socket.emit('place_bid', {
+      auctionId: 'demo_1',
+      userId: user.name,
+      amount: newBid,
+      idempotencyKey: Math.random().toString(36).substring(7)
     });
-    setStatus("ENDED");
   };
 
-  const renderLobby = () => (
-    <div className="flex-1 flex flex-col items-center justify-center h-full max-w-4xl mx-auto w-full pt-20 px-6 blur-0 transition-all duration-1000">
-      <div className="bg-zinc-900/60 backdrop-blur-2xl border border-yellow-500/30 rounded-3xl p-12 w-full shadow-2xl relative overflow-hidden group">
-        <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent"></div>
-        <div className="relative z-10 flex flex-col items-center text-center">
-            <span className="material-symbols-outlined text-6xl text-yellow-500 mb-6 animate-pulse">hourglass_top</span>
-            <p className="font-sans text-xs font-bold uppercase tracking-[0.3em] text-zinc-400 mb-4">Pre-Auction Lobby</p>
-            <h1 className="text-4xl md:text-5xl font-serif text-white mb-8">Waiting for Participants...</h1>
-            
-            <div className="flex flex-col md:flex-row items-center justify-center gap-12 w-full mt-8 border-t border-zinc-800/50 pt-12">
-               <div className="text-center">
-                   <p className="font-sans text-xs text-zinc-500 uppercase tracking-widest mb-2 font-bold">Starts In</p>
-                   <p className="text-6xl font-sans text-yellow-500 font-light tracking-tighter tabular-nums">{lobbyCountdown}s</p>
-               </div>
-               
-               <div className="hidden md:block w-px h-16 bg-zinc-800/60"></div>
-               
-               <div className="text-center">
-                   <p className="font-sans text-xs text-zinc-500 uppercase tracking-widest mb-2 font-bold">Collectors Joined</p>
-                   <p className={`text-6xl font-sans font-light tracking-tighter ${participants >= minParticipants ? 'text-green-500' : 'text-white'}`}>
-                      {participants}<span className="text-3xl text-zinc-600">/{minParticipants}</span>
-                   </p>
-               </div>
-            </div>
+  if (auction.status !== "live" && auction.status !== "ended") return null;
+
+  const renderLive = () => {
+    let user = {};
+    try {
+       const parsed = JSON.parse(localStorage.getItem('auctra_user'));
+       if (parsed) user = parsed;
+    } catch(e) {}
+    
+    return (
+      <main className="pt-32 pb-12 px-6 lg:px-12 grid grid-cols-1 lg:grid-cols-12 gap-8 flex-1 h-full min-h-[calc(100vh-90px)] overflow-hidden animate-in fade-in duration-1000 slide-in-from-bottom-8">
+        
+        {/* User Role Identity Badge */}
+        <div className="absolute top-28 right-12 z-20 flex items-center gap-3 bg-surface-container-high border border-outline-variant/20 px-6 py-3 rounded-full shadow-2xl">
+           <div className={`w-3 h-3 rounded-full animate-pulse ${user.role === 'seller' ? 'bg-yellow-500' : 'bg-blue-500'}`}></div>
+           <span className="text-xs font-bold uppercase tracking-widest text-on-surface">
+             {user.role === 'seller' ? 'Hosting Event' : 'Active Bidder'} ({user.name || "Guest"})
+           </span>
         </div>
-      </div>
-    </div>
-  );
 
-  const renderLive = () => (
-    <main className="pt-32 pb-12 px-6 lg:px-12 grid grid-cols-1 lg:grid-cols-12 gap-8 flex-1 h-full min-h-[calc(100vh-90px)] overflow-hidden animate-in fade-in duration-1000 slide-in-from-bottom-8">
-      <AuctionItem onEnd={handleAuctionEnd} />
-      {/* Bid panel needs onEnd hook too to trigger completion based on the countdown timer inside BidPanel */}
-      <BidPanel onAuctionComplete={handleAuctionEnd} /> 
-      <Leaderboard />
-    </main>
-  );
-
-  const renderCancelled = () => (
-    <div className="flex-1 flex flex-col items-center justify-center h-full max-w-4xl mx-auto w-full pt-20 px-6">
-       <div className="bg-red-950/20 backdrop-blur-md border border-red-900/50 rounded-3xl p-12 w-full text-center">
-          <span className="material-symbols-outlined text-5xl text-red-500 mb-4">cancel</span>
-          <h2 className="text-3xl text-white font-serif mb-2">Auction Aborted</h2>
-          <p className="text-zinc-400 font-sans">Insufficient participants joined the reserve pool. The asset has been preserved.</p>
-       </div>
-    </div>
-  );
+        <AuctionItem timeLeft={timeLeft} itemDetails={auction.item} />
+        <BidPanel 
+           currentBid={currentBid} 
+           leadingBidder={leadingBidder} 
+           onPlaceBid={handlePlaceBid} 
+           currentUser={user.name}
+        /> 
+        <Leaderboard bidHistory={bidHistory} />
+      </main>
+    );
+  };
 
   return (
     <div className="bg-surface text-on-surface min-h-screen flex flex-col relative overflow-hidden">
@@ -122,9 +173,7 @@ export default function Auction() {
 
       {/* State Switcher */}
       <div className="flex-1 flex flex-col relative z-10 w-full">
-         {status === "LOBBY" && renderLobby()}
          {status === "LIVE" && renderLive()}
-         {status === "CANCELLED" && renderCancelled()}
          {status === "ENDED" && renderLive() /* Keep Live view mounted behind winner modal */}
       </div>
 

@@ -1,4 +1,6 @@
 import { useState, useRef } from "react";
+import { useNavigate } from "react-router-dom";
+import { useAuction } from "../context/AuctionContext";
 
 export default function SellerDashboard({ isOpen, onClose }) {
   const [formData, setFormData] = useState({
@@ -18,6 +20,9 @@ export default function SellerDashboard({ isOpen, onClose }) {
   const [isGenerating, setIsGenerating] = useState(false);
   const [suggestedPrice, setSuggestedPrice] = useState(null);
   const fileInputRef = useRef(null);
+  
+  const navigate = useNavigate();
+  const { createAuction } = useAuction();
 
   if (!isOpen) return null;
 
@@ -153,14 +158,16 @@ export default function SellerDashboard({ isOpen, onClose }) {
       const submissionData = {
         ...formData,
         suggestedBasePrice: suggestedPrice,
-        imagePresent: !!imagePreview
+        imagePresent: !!imagePreview,
+        imagePreview: imagePreview // Pass it to context so it visually carries over
       };
-      console.log("🚀 ~ Listing Data for Auction:", submissionData);
-      alert("Product successfully listed! Check console for data.");
-      // Optional: close modal
+      
+      // Hook into global Context
+      createAuction(submissionData);
+      
       onClose();
-      // Simple mock trigger to jump straight into Auction Lobby if they click Host
-      window.location.href = "/auction?state=LOBBY";
+      // Use client side routing to seamlessly slide into Lobby
+      navigate("/lobby");
     }
   };
 
