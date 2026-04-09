@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route } from "react-router-dom";
 import Landing from "./pages/Landing";
 import Auction from "./pages/Auction";
 import AuctionLobby from "./pages/AuctionLobby";
+import InviteGateway from "./pages/InviteGateway";
 import NotificationPanel from "./components/NotificationPanel";
 import { AuctionProvider } from "./context/AuctionContext";
 

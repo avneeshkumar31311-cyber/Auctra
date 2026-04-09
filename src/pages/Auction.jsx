@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import Navbar from "../components/Navbar";
 import AuctionItem from "../auction/AuctionItem";
 import BidPanel from "../auction/BidPanel";
@@ -11,6 +11,7 @@ import { useAuction } from "../context/AuctionContext";
 export default function Auction() {
   const { auction, socket } = useAuction();
   const navigate = useNavigate();
+  const { auctionId } = useParams();
 
   const [status, setStatus] = useState("LIVE"); // 'LIVE' | 'ENDED'
   const [showAuth, setShowAuth] = useState(false);
@@ -40,9 +41,17 @@ export default function Auction() {
 
   // 2. WebSocket Engine (SSOT)
   useEffect(() => {
-    if (status !== "LIVE" || !socket) return;
+    if (status !== "LIVE" || !socket || !auctionId) return;
     
-    socket.emit('join_auction_room', { auctionId: 'demo_1', userId: 'You' });
+    // Check if we have a robust token from entry
+    const token = localStorage.getItem(`auctra_token_${auctionId}`);
+    let user = { name: "Guest" };
+    try {
+       const parsed = JSON.parse(localStorage.getItem('auctra_user'));
+       if (parsed) user = parsed;
+    } catch(e) {}
+
+    socket.emit('join_auction_room', { auctionId, userId: user.name, token });
 
     const handleStateUpdate = (state) => {
       setCurrentBid(state.highestBid);
@@ -123,7 +132,7 @@ export default function Auction() {
     
     // Convert to a raw network emit. NO UI override! UI will update if Node accepts it securely.
     socket.emit('place_bid', {
-      auctionId: 'demo_1',
+      auctionId,
       userId: user.name,
       amount: newBid,
       idempotencyKey: Math.random().toString(36).substring(7)

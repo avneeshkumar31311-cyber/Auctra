@@ -167,7 +167,7 @@ export default function SellerDashboard({ isOpen, onClose }) {
       
       onClose();
       // Use client side routing to seamlessly slide into Lobby
-      navigate("/lobby");
+      navigate(`/auction/demo_1/lobby`);
     }
   };
 

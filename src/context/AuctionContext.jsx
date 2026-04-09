@@ -7,14 +7,25 @@ const AuctionContext = createContext();
 export const useAuction = () => useContext(AuctionContext);
 
 export const AuctionProvider = ({ children }) => {
-  const [auction, setAuction] = useState({
-    item: null, // { title, image, price, etc }
-    seller: null,
-    invitedBidders: [],
-    acceptedBidders: [],
-    rejectedBidders: [],
-    status: 'idle', // idle, waiting, ready, live, ended
+  const [auction, setAuction] = useState(() => {
+    try {
+      const saved = localStorage.getItem('auctra_current_auction');
+      if (saved) return JSON.parse(saved);
+    } catch(e) {}
+    return {
+      item: null, // { title, image, price, etc }
+      seller: null,
+      invitedBidders: [],
+      acceptedBidders: [],
+      rejectedBidders: [],
+      status: 'idle', // idle, waiting, ready, live, ended
+    };
   });
+
+  useEffect(() => {
+    localStorage.setItem('auctra_current_auction', JSON.stringify(auction));
+  }, [auction]);
+  const [notifications, setNotifications] = useState([]);
 
   // Join global socket on mount to listen for Cross-Profile Invites
   useEffect(() => {
@@ -30,17 +41,75 @@ export const AuctionProvider = ({ children }) => {
         ...prev, 
         {
           id: payload.auctionId || Date.now(),
+          type: 'invite',
           itemName: payload.item.title || "Unknown Asset",
           seller: payload.seller || "Auctra Host",
-          status: "pending"
+          status: "pending",
+          itemData: payload.item,
+          sellerData: payload.seller,
+          auctionId: payload.auctionId
         }
       ]);
     };
 
+    const handleBidderAccepted = (payload) => {
+      console.log("🌐 BIDDER ACCEPTED:", payload);
+      
+      // Notify the host visually!
+      const notifId = Date.now() + Math.random();
+      setNotifications(prev => [
+        ...prev,
+        {
+          id: notifId,
+          type: 'info',
+          message: `${payload.bidder} joined the waiting room.`
+        }
+      ]);
+
+      setTimeout(() => {
+        setNotifications(current => current.filter(n => n.id !== notifId));
+      }, 5000);
+
+      setAuction(prev => {
+        // Prevent Seller inherently appearing in the bidder list!
+        if (payload.bidder === prev.seller || payload.bidder === 'Auctra Host') return prev;
+        
+        // Only add if not already in acceptedBidders
+        if (prev.acceptedBidders.includes(payload.bidder)) return prev;
+        
+        const newAccepted = [...prev.acceptedBidders, payload.bidder];
+        let newStatus = prev.status;
+        if (prev.status === 'waiting' && newAccepted.length >= 2) {
+           newStatus = 'ready';
+        }
+        return { ...prev, acceptedBidders: newAccepted, status: newStatus };
+      });
+    };
+
     socket.on('new_auction_invite', handleNewInvite);
+    socket.on('bidder_accepted_invite', handleBidderAccepted);
+    
+    // Hydration mechanism from system design
+    const handleHydration = (stateUpdate) => {
+       console.log("🌐 ROOM HYDRATION RECEIVED:", stateUpdate);
+       setAuction(prev => ({
+         ...prev,
+         ...stateUpdate
+       }));
+    };
+    socket.on('auction_state_update', handleHydration);
+
+    const handleAuctionLive = (payload) => {
+       console.log("🔥 SYSTEM FORCING TRANSITION TO LIVE ROOM:", payload);
+       setAuction(prev => ({ ...prev, status: 'LIVE' }));
+    };
+    socket.on('auction_live', handleAuctionLive);
 
     return () => {
       socket.off('new_auction_invite', handleNewInvite);
+      socket.off('bidder_accepted_invite', handleBidderAccepted);
+      socket.off('auction_state_update', handleHydration);
+      socket.off('auction_live', handleAuctionLive);
     };
   }, []);
 
@@ -55,8 +124,8 @@ export const AuctionProvider = ({ children }) => {
       id: "demo_1",
       item: itemDetails,
       seller: user.name,
-      invitedBidders: [user.name], // Only Real Users now!
-      acceptedBidders: [user.name], // Host implicitly accepts
+      invitedBidders: [], // Real Users only, Host not included
+      acceptedBidders: [], // Host not explicitly accepted
       rejectedBidders: [],
       status: 'waiting',
     };
@@ -71,26 +140,32 @@ export const AuctionProvider = ({ children }) => {
     });
   };
 
-  const acceptInvite = (bidder) => {
-    let user = { name: "Guest" };
+  const acceptInvite = (bidder, notifDetails = null) => {
+    let user = { name: `Guest_${Math.floor(Math.random()*1000)}` };
     try {
       const parsed = JSON.parse(localStorage.getItem('auctra_user'));
       if (parsed) user = parsed;
     } catch(e) {}
     const actualBidder = bidder === "You" ? user.name : bidder;
 
+    // Broadcast RSVP
+    socket.emit('accept_auction_invite', { auctionId: notifDetails ? notifDetails.auctionId : "demo_1", bidder: actualBidder });
+
     setAuction(prev => {
       if (prev.acceptedBidders.includes(actualBidder)) return prev;
 
       const newAccepted = [...prev.acceptedBidders, actualBidder];
       let newStatus = prev.status;
-      // Start button only unlocks when 2 real users accept!
-      if (prev.status === 'waiting' && newAccepted.length >= 2) {
-         newStatus = 'ready';
+      if (prev.status === 'idle' || prev.status === 'waiting') {
+         if (newAccepted.length >= 2) newStatus = 'ready';
+         else newStatus = 'waiting';
       }
 
       return {
         ...prev,
+        item: notifDetails ? notifDetails.itemData : prev.item,
+        seller: notifDetails ? notifDetails.sellerData : prev.seller,
+        id: notifDetails ? notifDetails.auctionId : prev.id,
         acceptedBidders: newAccepted,
         status: newStatus
       };
@@ -118,7 +193,8 @@ export const AuctionProvider = ({ children }) => {
   };
 
   const startAuction = () => {
-    socket.emit('start_live_auction', { auctionId: "demo_1", durationMs: 15000 });
+    const targetRoom = auction?.id || "demo_1";
+    socket.emit('start_live_auction', { auctionId: targetRoom, durationMs: 15000 });
     setAuction(prev => ({ ...prev, status: 'live' }));
   };
 
